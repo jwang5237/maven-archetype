@@ -65,6 +65,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -491,23 +492,50 @@ public class DefaultFilesetArchetypeGenerator
             getLogger().info( "Parameter: " + Constants.PACKAGE_IN_PATH_FORMAT + ", Value: " + packageInPathFormat );
         }
 
-        for ( Iterator<?> iterator = request.getProperties().keySet().iterator(); iterator.hasNext(); )
+        return withResolvedProperties( context, (Properties) request.getProperties().clone() );
+    }
+    
+    private Context withResolvedProperties( Context context, Properties properties ) 
+    {
+        boolean progress = false;
+         
+        for ( Iterator<?> iterator = properties.keySet().iterator(); iterator.hasNext(); )
         {
             String key = (String) iterator.next();
-
-            String value = request.getProperties().getProperty( key );
-
-            if ( maybeVelocityExpression( value ) )
+            String value = properties.getProperty( key );
+         
+      
+            String evaluated = evaluateExpression( context, key, value );
+            if ( !value.equals( evaluated ) ) 
             {
-                value = evaluateExpression( context, key, value );
-            }
-
-            context.put( key, value );
-
-            if ( getLogger().isInfoEnabled() )
+                // Update, but don't remove yet; resolution might not be complete.
+                properties.setProperty( key, evaluated );
+                progress = true;
+            } 
+            else 
             {
+                context.put( key, value );
+                iterator.remove();
+                progress = true;
                 getLogger().info( "Parameter: " + key + ", Value: " + value );
             }
+        }
+         
+        if ( progress )
+        {
+            return withResolvedProperties( context, properties );
+        }   
+        
+        for ( Iterator<?> iterator = properties.keySet().iterator(); iterator.hasNext(); )
+        {
+            // Nothing interesting is happening with any remaining 
+            // maybeVelocityExpressions. Interpret them literally:
+            String key = ( String ) iterator.next();
+            String value = properties.getProperty( key );
+            getLogger().info( "Parameter: " + key + ", Value: " + value );
+        
+            context.put( key, value );
+        
         }
         return context;
     }
@@ -612,25 +640,55 @@ public class DefaultFilesetArchetypeGenerator
         {
             ModuleDescriptor project = subprojects.next();
 
+            String subdirName = StringUtils.replace( project.getDir(), "__rootArtifactId__",
+                        rootArtifactId );
+            subdirName = replaceDirectorynameTokens( context, subdirName );
             File moduleOutputDirectoryFile = new File( outputDirectoryFile,
-                                                       StringUtils.replace( project.getDir(), "__rootArtifactId__",
-                                                                            rootArtifactId ) );
+                                                       subdirName );
 
+            String childArtifactId = StringUtils.replace( project.getId(), "${rootArtifactId}", rootArtifactId );
+            childArtifactId = expandDollarProperties( childArtifactId, context );
             context.put( Constants.ARTIFACT_ID,
-                         StringUtils.replace( project.getId(), "${rootArtifactId}", rootArtifactId ) );
+                        childArtifactId );
 
+            String moduleOffsetSuffix = StringUtils.replace( project.getDir(), "${rootArtifactId}", rootArtifactId );
             processFilesetModule( rootArtifactId,
-                                  StringUtils.replace( project.getDir(), "__rootArtifactId__", rootArtifactId ),
+                                  subdirName,
                                   archetypeResources, new File( moduleOutputDirectoryFile, Constants.ARCHETYPE_POM ),
                                   archetypeZipFile,
                                   ( StringUtils.isEmpty( moduleOffset ) ? "" : ( moduleOffset + "/" ) )
-                                      + StringUtils.replace( project.getDir(), "${rootArtifactId}", rootArtifactId ),
+                                      + moduleOffsetSuffix,
                                   pom, moduleOutputDirectoryFile, packageName, project, context );
         }
 
         restoreParentArtifactId( context, parentArtifactId );
 
         getLogger().debug( "Processed " + artifactId );
+    }
+    
+    private String expandDollarProperties( String value, Context context )
+    {
+        final String pattern = "\\$\\{([a-zA-Z0-9_.\\-]+)\\}";
+        final Pattern compiledPattern = Pattern.compile( pattern );
+        final Matcher matcher = compiledPattern.matcher( value );
+        if ( matcher.find() )
+        {
+            final String property = matcher.group( 1 );
+            if ( context.get( property ) != null )
+            {
+                value = value.replaceAll( pattern, ( String ) context.get( property ) );
+            }
+        }
+        return value;
+    }
+
+    private String replaceDirectorynameTokens( final Context context, String outputFileName )
+    {
+        if ( TOKEN_PATTERN.matcher( outputFileName ).matches() )
+        {
+            outputFileName = replaceFilenameTokens( outputFileName, context );
+        }
+        return outputFileName;
     }
 
     private void processFilesetProject( final AbstractArchetypeDescriptor archetypeDescriptor, final String moduleId,
